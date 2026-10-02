@@ -1,4 +1,4 @@
-import type { AiSuggestion, AppState } from './types';
+import type { AppState } from '../types';
 
 export const STORAGE_KEY = 'hakka-field-assistant:v1';
 

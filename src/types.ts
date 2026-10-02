@@ -1,3 +1,5 @@
+export type ScenarioId = 'hakka_lian_du_bian_diao' | 'hakka_xiao_cheng_bian_diao';
+
 export type Project = {
   id: string;
   name: string;
@@ -5,6 +7,9 @@ export type Project = {
   dialectArea: string;
   createdAt: string;
   description?: string;
+  scenarioId: ScenarioId;
+  scenarioVersion: string;
+  scenarioTitle: string;
 };
 
 export type Speaker = {
@@ -19,19 +24,29 @@ export type Speaker = {
   createdAt: string;
 };
 
+export type ItemStatus = 'pending' | 'recorded' | 'review' | 'completed';
+
 export type Item = {
   id: string;
   projectId: string;
   code: string;
+  templateCode?: string;
+  scenarioId?: ScenarioId;
+  isTemplateItem?: boolean;
   hanzi?: string;
   word?: string;
+  prompt?: string;
   meaning?: string;
+  targetContext?: string;
+  changeType?: string;
   phonetic?: string;
   tone?: string;
   notes?: string;
-  status: 'pending' | 'recorded' | 'review' | 'completed';
+  status: ItemStatus;
   createdAt: string;
 };
+
+export type RecordingStatus = 'pending' | 'valid' | 'retake';
 
 export type Recording = {
   id: string;
@@ -39,9 +54,18 @@ export type Recording = {
   speakerId: string;
   itemId: string;
   fileName: string;
-  audioDataUrl: string;
+  audioBlobId?: string;
+  audioDataUrl?: string;
+  mimeType?: string;
+  durationSec?: number;
+  sampleRate?: number;
+  channels?: number;
+  bitDepth?: number;
+  takeNumber?: number;
+  scenarioId?: ScenarioId;
+  itemCode?: string;
   createdAt: string;
-  status: 'pending' | 'valid' | 'retake';
+  status: RecordingStatus;
   notes?: string;
 };
 

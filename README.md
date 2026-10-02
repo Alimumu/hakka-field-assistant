@@ -1,63 +1,55 @@
 # Hakka Field Assistant
 
-A minimal fieldwork prototype for Hakka dialect investigations, designed for a 1-month hackathon workflow with a single developer and one linguistics researcher.
+面向客家话田野调查的离线优先 MVP（React + TypeScript + Vite）。
 
-## Goals
+## 当前可用场景（内置模板）
 
-- Manage fieldwork projects and speakers.
-- Create and import investigation items.
-- Record audio from the browser microphone.
-- Store local metadata and export project packages.
-- Use an AI assistant (DeepSeek-ready adapter) for note summarization and review suggestions.
-- Enable offline-first usage without cloud dependency.
+- 主场景：**客家话连读变调**
+- 次场景：**小称变调**
 
-## Tech stack
+> 内置条目为“研究模板（可编辑）”，用于采录工作流，不预设具体客家方言结论。
 
-- React
-- TypeScript
-- Vite
-- IndexedDB-ready local storage structure
-- JSZip for export
-- DeepSeek adapter scaffold
+## 核心流程
 
-## Getting started
+1. 新建项目时必须选择调查场景。
+2. 系统自动加载该场景模板条目（不需要手动新增条目）。
+3. 添加发音人，选择条目后开始录音。
+4. 每条可多次采录，标记“有效/重录”，并查看总进度（总数、已录、有效、重录、待采录）。
+5. 可“重载模板（保留录音）”刷新条目内容。
+6. 导出 ZIP（`audio/*.wav` + `recordings.csv` + `project.json`）。
 
-1. Install dependencies:
+## 音频格式（Praat 兼容）
 
-   npm install
+- 格式：**WAV (RIFF/WAVE PCM 16-bit, mono)**
+- 采样率：浏览器 AudioContext（优先 48kHz，设备环境下可能为 44.1kHz）
+- 录音完全本地处理，不依赖 AI 或网络
+- 音频 Blob 存在 IndexedDB，避免 localStorage 容量导致音频丢失
 
-2. Run the app:
+## 导出内容
 
-   npm run dev
+- `audio/*.wav`：稳定 ASCII 安全文件名，便于外部工具处理
+- `recordings.csv`：项目、场景、条目、发音人、take/status、时间戳、文件名、备注
+- `project.json`：元数据导出（不内嵌大体积音频 data URL）
 
-3. Open the local URL shown in the terminal.
+## Praat 使用步骤（手动）
 
-## Suggested workflow
+1. 解压导出的 ZIP。
+2. 在 Praat 中选择 `Open > Read from file...`，打开 `audio/` 下的 `.wav` 文件。
+3. 在 Objects 窗口选中 Sound，点 `View & Edit` 查看 waveform 与 spectrogram（语图）。
+4. 如需标注，使用 `Annotate > To TextGrid...` 新建 TextGrid（本项目不自动生成 TextGrid）。
+5. 在编辑器中完成切分与标注后，`File > Write TextGrid to text file...` 保存。
 
-1. Create a project.
-2. Enter the location and dialect area.
-3. Add speakers.
-4. Add fieldwork items or import CSV.
-5. Record the selected item.
-6. Mark valid or retake.
-7. Use AI note summarization to improve workflow.
-8. Export the project as a ZIP bundle.
+## 已知限制
 
-## Important note
+- 模板条目为研究起始清单，正式调查需按课题组规范继续校订。
+- 不含自动语音识别、自动变调判断、自动 TextGrid 生成。
+- 录音依赖浏览器麦克风权限；权限拒绝会显示中文错误提示。
 
-This is a prototype and intentionally prioritizes a minimal viable workflow over full phonetic analysis.
-The AI integration is intentionally scaffolded so it can later be upgraded to a DeepSeek backend proxy without changing the frontend UI.
+## 开发
 
-## Files to extend later
-
-- `src/lib/ai.ts` for the AI adapter and model wrapper.
-- `src/lib/storage.ts` for local persistence and data model updates.
-- `src/App.tsx` for project workflow UI.
-
-## Roadmap
-
-- Stable field recording and local saving.
-- AI-assisted note review.
-- Better export format.
-- CSV import, project recovery, and stronger data validation.
-- Full DeepSeek backend proxy and export formatting.
+```bash
+npm install
+npm run lint
+npm run build
+npm run dev
+```
