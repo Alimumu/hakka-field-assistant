@@ -1,18 +1,14 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import JSZip from 'jszip';
+import { SCENARIO_DEFINITIONS, SCENARIOS, createItemsFromScenario } from './data/scenarios';
 import { generateAiSuggestion, type AiSuggestion } from './lib/ai';
+import { getAudioBlob, saveAudioBlob } from './lib/audioStore';
 import { loadAppState, persistAppState } from './lib/storage';
-import type { AppState, Item, Project, Recording, Speaker } from './types';
+import { encodePcm16Wav } from './lib/wav';
+import type { AppState, Item, ItemStatus, Project, Recording, ScenarioId, Speaker } from './types';
 
+const DEFAULT_SCENARIO_ID: ScenarioId = 'hakka_lian_du_bian_diao';
 const defaultProjectName = '新调查项目';
-
-const blobToDataUrl = (blob: Blob): Promise<string> =>
-  new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onloadend = () => resolve(String(reader.result ?? ''));
-    reader.onerror = reject;
-    reader.readAsDataURL(blob);
-  });
 
 const dataUrlToBlob = (dataUrl: string): Blob => {
   const [prefix, base64] = dataUrl.split(',');
@@ -35,12 +31,70 @@ const csvEscape = (value: string | number | undefined): string => {
   return text;
 };
 
+const sanitizeAscii = (value: string) => {
+  const normalized = value
+    .normalize('NFKD')
+    .replace(/[^\x00-\x7F]/g, '')
+    .replace(/[^A-Za-z0-9_-]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  return normalized || 'na';
+};
+
+const isoStamp = (date: Date) => date.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
+
+const getItemStatus = (itemId: string, recordings: Recording[]): ItemStatus => {
+  const itemRecordings = recordings.filter((entry) => entry.itemId === itemId);
+  if (itemRecordings.some((entry) => entry.status === 'valid')) {
+    return 'completed';
+  }
+  if (itemRecordings.some((entry) => entry.status === 'retake')) {
+    return 'review';
+  }
+  if (itemRecordings.length > 0) {
+    return 'recorded';
+  }
+  return 'pending';
+};
+
+const getPreferredBlob = async (recording: Recording): Promise<Blob | null> => {
+  if (recording.audioBlobId) {
+    const blob = await getAudioBlob(recording.audioBlobId);
+    if (blob) {
+      return blob;
+    }
+  }
+  if (recording.audioDataUrl) {
+    return dataUrlToBlob(recording.audioDataUrl);
+  }
+  return null;
+};
+
+const ensureProjectScenario = (project: Project): Project => {
+  if (project.scenarioId && project.scenarioVersion && project.scenarioTitle) {
+    return project;
+  }
+  const fallback = SCENARIO_DEFINITIONS[DEFAULT_SCENARIO_ID];
+  return {
+    ...project,
+    scenarioId: fallback.id,
+    scenarioTitle: fallback.title,
+    scenarioVersion: fallback.version,
+  };
+};
+
 function App() {
-  const [appState, setAppState] = useState<AppState>(() => loadAppState());
+  const [appState, setAppState] = useState<AppState>(() => {
+    const loaded = loadAppState();
+    return {
+      ...loaded,
+      projects: loaded.projects.map(ensureProjectScenario),
+    };
+  });
   const [selectedProjectId, setSelectedProjectId] = useState<string>(() => loadAppState().projects[0]?.id ?? '');
   const [newProjectName, setNewProjectName] = useState(defaultProjectName);
   const [newProjectLocation, setNewProjectLocation] = useState('广东');
   const [newProjectDialect, setNewProjectDialect] = useState('客家话');
+  const [newProjectScenarioId, setNewProjectScenarioId] = useState<ScenarioId>(DEFAULT_SCENARIO_ID);
   const [newSpeaker, setNewSpeaker] = useState({
     code: 'SPK001',
     gender: '未知',
@@ -49,23 +103,21 @@ function App() {
     dialectPoint: '',
     notes: '',
   });
-  const [newItem, setNewItem] = useState({
-    code: 'ITEM001',
-    hanzi: '',
-    word: '',
-    meaning: '',
-    phonetic: '',
-    tone: '',
-    notes: '',
-  });
   const [recordingNotes, setRecordingNotes] = useState('');
   const [aiSummary, setAiSummary] = useState<AiSuggestion | null>(null);
   const [isRecording, setIsRecording] = useState(false);
   const [activeMessage, setActiveMessage] = useState('');
-  const [recordingMeta, setRecordingMeta] = useState<{ speakerId: string; itemId: string } | null>(null);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const recordedChunksRef = useRef<Blob[]>([]);
+  const [recordingMeta, setRecordingMeta] = useState<{ speakerId: string; itemId: string }>({ speakerId: '', itemId: '' });
+  const [audioUrls, setAudioUrls] = useState<Record<string, string>>({});
+
   const streamRef = useRef<MediaStream | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const mediaSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const processorRef = useRef<ScriptProcessorNode | null>(null);
+  const sampleRateRef = useRef<number>(48000);
+  const startedAtRef = useRef<number>(0);
+  const pcmChunksRef = useRef<Float32Array[]>([]);
+  const recordingContextRef = useRef<{ projectId: string; speakerId: string; itemId: string } | null>(null);
 
   useEffect(() => {
     persistAppState(appState);
@@ -80,6 +132,11 @@ function App() {
   const selectedProject = useMemo(
     () => appState.projects.find((project) => project.id === selectedProjectId) ?? appState.projects[0],
     [appState.projects, selectedProjectId],
+  );
+
+  const selectedScenario = useMemo(
+    () => (selectedProject ? SCENARIO_DEFINITIONS[selectedProject.scenarioId] : null),
+    [selectedProject],
   );
 
   const projectSpeakers = useMemo(
@@ -97,10 +154,66 @@ function App() {
     [appState.recordings, selectedProject?.id],
   );
 
-  const selectedSpeakerId = recordingMeta?.speakerId ?? projectSpeakers[0]?.id ?? '';
-  const selectedItemId = recordingMeta?.itemId ?? projectItems[0]?.id ?? '';
+  const selectedSpeakerId = recordingMeta.speakerId || projectSpeakers[0]?.id || '';
+  const selectedItemId = recordingMeta.itemId || projectItems[0]?.id || '';
+
+  useEffect(() => {
+    setRecordingMeta((prev) => ({
+      speakerId: prev.speakerId || projectSpeakers[0]?.id || '',
+      itemId: prev.itemId || projectItems[0]?.id || '',
+    }));
+  }, [selectedProject?.id, projectSpeakers, projectItems]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const currentUrls: string[] = [];
+
+    const loadAudioUrls = async () => {
+      const next: Record<string, string> = {};
+      for (const recording of projectRecordings) {
+        const blob = await getPreferredBlob(recording);
+        if (!blob) {
+          continue;
+        }
+        const url = URL.createObjectURL(blob);
+        next[recording.id] = url;
+        currentUrls.push(url);
+      }
+      if (!cancelled) {
+        setAudioUrls(next);
+      } else {
+        currentUrls.forEach((url) => URL.revokeObjectURL(url));
+      }
+    };
+
+    void loadAudioUrls();
+
+    return () => {
+      cancelled = true;
+      currentUrls.forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, [projectRecordings]);
+
+  const progress = useMemo(() => {
+    const total = projectItems.length;
+    const recorded = projectItems.filter((item) => projectRecordings.some((entry) => entry.itemId === item.id)).length;
+    const valid = projectItems.filter((item) => projectRecordings.some((entry) => entry.itemId === item.id && entry.status === 'valid')).length;
+    const retake = projectItems.filter((item) => {
+      const itemRecordings = projectRecordings.filter((entry) => entry.itemId === item.id);
+      return itemRecordings.some((entry) => entry.status === 'retake') && !itemRecordings.some((entry) => entry.status === 'valid');
+    }).length;
+    const pending = total - recorded;
+    return { total, recorded, valid, retake, pending };
+  }, [projectItems, projectRecordings]);
+
+  const selectedItemIndex = projectItems.findIndex((item) => item.id === selectedItemId);
 
   const createProject = () => {
+    const scenario = SCENARIO_DEFINITIONS[newProjectScenarioId];
+    if (!scenario) {
+      setActiveMessage('调查场景模板缺失，请检查本地模板文件。');
+      return;
+    }
     if (!newProjectName.trim()) {
       setActiveMessage('请输入项目名称。');
       return;
@@ -108,19 +221,29 @@ function App() {
 
     const project: Project = {
       id: crypto.randomUUID(),
-      name: newProjectName,
+      name: newProjectName.trim(),
       location: newProjectLocation,
       dialectArea: newProjectDialect,
       createdAt: new Date().toISOString(),
-      description: '首次黑客松版田野调查项目',
+      description: '田野调查项目（场景模板驱动）',
+      scenarioId: scenario.id,
+      scenarioVersion: scenario.version,
+      scenarioTitle: scenario.title,
     };
 
-    setAppState((prev) => ({ ...prev, projects: [project, ...prev.projects] }));
+    const items = createItemsFromScenario(project.id, scenario);
+
+    setAppState((prev) => ({
+      ...prev,
+      projects: [project, ...prev.projects],
+      items: [...items, ...prev.items],
+    }));
     setSelectedProjectId(project.id);
+    setRecordingMeta({ speakerId: '', itemId: items[0]?.id ?? '' });
     setNewProjectName(defaultProjectName);
     setNewProjectLocation('广东');
     setNewProjectDialect('客家话');
-    setActiveMessage(`已创建项目：${project.name}`);
+    setActiveMessage(`已创建项目：${project.name}（${scenario.title}）`);
   };
 
   const createSpeaker = () => {
@@ -151,47 +274,110 @@ function App() {
       notes: '',
     });
     setRecordingMeta((prev) => ({
-      speakerId: prev?.speakerId ?? speaker.id,
-      itemId: prev?.itemId ?? selectedItemId,
+      speakerId: prev.speakerId || speaker.id,
+      itemId: prev.itemId || selectedItemId,
     }));
     setActiveMessage(`已新增发音人：${speaker.code}`);
   };
 
-  const addItem = () => {
+  const addCustomItem = () => {
     if (!selectedProject) {
-      setActiveMessage('请先创建一个项目。');
+      setActiveMessage('请先创建项目。');
       return;
     }
-
     const item: Item = {
       id: crypto.randomUUID(),
       projectId: selectedProject.id,
-      code: newItem.code || `ITEM${projectItems.length + 1}`,
-      hanzi: newItem.hanzi,
-      word: newItem.word,
-      meaning: newItem.meaning,
-      phonetic: newItem.phonetic,
-      tone: newItem.tone,
-      notes: newItem.notes,
+      code: `CUSTOM-${projectItems.length + 1}`,
+      prompt: '开发者自定义条目',
+      notes: '非标准流程手动新增',
       status: 'pending',
       createdAt: new Date().toISOString(),
     };
-
     setAppState((prev) => ({ ...prev, items: [item, ...prev.items] }));
-    setNewItem({
-      code: `ITEM${projectItems.length + 2}`,
-      hanzi: '',
-      word: '',
-      meaning: '',
-      phonetic: '',
-      tone: '',
-      notes: '',
+    setActiveMessage('已新增开发者自定义条目。');
+  };
+
+  const reloadScenarioTemplate = () => {
+    if (!selectedProject) {
+      return;
+    }
+    const scenario = SCENARIO_DEFINITIONS[selectedProject.scenarioId];
+    if (!scenario) {
+      setActiveMessage('未找到该项目对应的场景模板，无法重载。');
+      return;
+    }
+    const accepted = window.confirm('重载场景模板将刷新条目内容，但不会删除已有录音。是否继续？');
+    if (!accepted) {
+      return;
+    }
+
+    setAppState((prev) => {
+      const projectItemsCurrent = prev.items.filter((item) => item.projectId === selectedProject.id);
+      const templateItemsCurrent = projectItemsCurrent.filter((item) => item.templateCode || item.isTemplateItem);
+      const customItems = projectItemsCurrent.filter((item) => !item.templateCode && !item.isTemplateItem);
+      const templateMap = new Map(templateItemsCurrent.map((item) => [item.templateCode || item.code, item]));
+      const matchedCodes = new Set<string>();
+
+      const refreshedTemplateItems = scenario.items.map((entry) => {
+        const existing = templateMap.get(entry.code);
+        matchedCodes.add(entry.code);
+        if (existing) {
+          return {
+            ...existing,
+            code: entry.code,
+            templateCode: entry.code,
+            scenarioId: scenario.id,
+            isTemplateItem: true,
+            hanzi: entry.hanzi,
+            word: entry.word,
+            prompt: entry.prompt,
+            meaning: entry.meaning,
+            targetContext: entry.targetContext,
+            changeType: entry.changeType,
+            phonetic: entry.phoneticPlaceholder,
+            notes: entry.notes,
+          };
+        }
+        return {
+          id: crypto.randomUUID(),
+          projectId: selectedProject.id,
+          code: entry.code,
+          templateCode: entry.code,
+          scenarioId: scenario.id,
+          isTemplateItem: true,
+          hanzi: entry.hanzi,
+          word: entry.word,
+          prompt: entry.prompt,
+          meaning: entry.meaning,
+          targetContext: entry.targetContext,
+          changeType: entry.changeType,
+          phonetic: entry.phoneticPlaceholder,
+          notes: entry.notes,
+          status: 'pending' as const,
+          createdAt: new Date().toISOString(),
+        };
+      });
+
+      const legacyTemplateItems = templateItemsCurrent.filter((item) => !matchedCodes.has(item.templateCode || item.code));
+      const otherProjectItems = prev.items.filter((item) => item.projectId !== selectedProject.id);
+
+      return {
+        ...prev,
+        projects: prev.projects.map((project) =>
+          project.id === selectedProject.id
+            ? {
+                ...project,
+                scenarioVersion: scenario.version,
+                scenarioTitle: scenario.title,
+              }
+            : project,
+        ),
+        items: [...otherProjectItems, ...refreshedTemplateItems, ...legacyTemplateItems, ...customItems],
+      };
     });
-    setRecordingMeta((prev) => ({
-      speakerId: prev?.speakerId ?? selectedSpeakerId,
-      itemId: prev?.itemId ?? item.id,
-    }));
-    setActiveMessage(`已新增调查条目：${item.code}`);
+
+    setActiveMessage('已重载场景模板，录音数据保持不变。');
   };
 
   const startRecording = async () => {
@@ -202,96 +388,176 @@ function App() {
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : undefined;
-      const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
-      recordedChunksRef.current = [];
+      const context = new AudioContext({ sampleRate: 48000 });
+      const source = context.createMediaStreamSource(stream);
+      const processor = context.createScriptProcessor(4096, 1, 1);
+
+      sampleRateRef.current = context.sampleRate;
+      pcmChunksRef.current = [];
+      startedAtRef.current = Date.now();
+      recordingContextRef.current = {
+        projectId: selectedProject.id,
+        speakerId: selectedSpeakerId,
+        itemId: selectedItemId,
+      };
+
+      processor.onaudioprocess = (event) => {
+        const input = event.inputBuffer.getChannelData(0);
+        pcmChunksRef.current.push(new Float32Array(input));
+      };
+
+      source.connect(processor);
+      processor.connect(context.destination);
+
       streamRef.current = stream;
-      mediaRecorderRef.current = recorder;
-
-      recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          recordedChunksRef.current.push(event.data);
-        }
-      };
-
-      recorder.onstop = async () => {
-        const blob = new Blob(recordedChunksRef.current, { type: recorder.mimeType || 'audio/webm' });
-        const audioDataUrl = await blobToDataUrl(blob);
-        const recording: Recording = {
-          id: crypto.randomUUID(),
-          projectId: selectedProject.id,
-          speakerId: selectedSpeakerId,
-          itemId: selectedItemId,
-          fileName: `${selectedProject.name}-${selectedSpeakerId}-${selectedItemId}-${Date.now()}.webm`,
-          audioDataUrl,
-          createdAt: new Date().toISOString(),
-          status: 'pending',
-          notes: recordingNotes.trim() || '无备注',
-        };
-
-        setAppState((prev) => ({
-          ...prev,
-          recordings: [recording, ...prev.recordings],
-        }));
-
-        setAppState((prev) => ({
-          ...prev,
-          items: prev.items.map((item) =>
-            item.id === selectedItemId ? { ...item, status: 'recorded' } : item,
-          ),
-        }));
-
-        setRecordingNotes('');
-        setIsRecording(false);
-        setActiveMessage(`已保存录音：${recording.fileName}`);
-
-        stream.getTracks().forEach((track) => track.stop());
-        mediaRecorderRef.current = null;
-        streamRef.current = null;
-      };
-
-      recorder.start();
+      audioContextRef.current = context;
+      mediaSourceRef.current = source;
+      processorRef.current = processor;
       setIsRecording(true);
-      setActiveMessage('正在录音…');
+      setActiveMessage('正在录音（WAV，单声道 PCM 16-bit）。');
     } catch (error) {
       console.error(error);
-      setActiveMessage('无法访问麦克风，请检查设备权限。');
+      setActiveMessage('无法访问麦克风，请检查浏览器麦克风权限与设备连接。');
     }
   };
 
-  const stopRecording = () => {
-    if (mediaRecorderRef.current && isRecording) {
-      mediaRecorderRef.current.stop();
+  const stopRecording = async () => {
+    if (!isRecording) {
+      return;
     }
+
+    processorRef.current?.disconnect();
+    mediaSourceRef.current?.disconnect();
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    await audioContextRef.current?.close();
+
+    setIsRecording(false);
+
+    const contextInfo = recordingContextRef.current;
+    if (!contextInfo) {
+      setActiveMessage('录音上下文缺失，未能保存。');
+      return;
+    }
+
+    const selectedItem = appState.items.find((item) => item.id === contextInfo.itemId);
+    const selectedSpeaker = appState.speakers.find((speaker) => speaker.id === contextInfo.speakerId);
+    const selectedProjectNow = appState.projects.find((project) => project.id === contextInfo.projectId);
+
+    if (!selectedProjectNow || !selectedItem || !selectedSpeaker) {
+      setActiveMessage('录音保存失败：项目、发音人或条目信息缺失。');
+      return;
+    }
+
+    const wavBlob = encodePcm16Wav(pcmChunksRef.current, sampleRateRef.current);
+    const durationSec = (Date.now() - startedAtRef.current) / 1000;
+    if (!wavBlob.type.includes('wav')) {
+      setActiveMessage('录音保存失败：生成的音频不是有效 WAV 格式。');
+      return;
+    }
+    if (wavBlob.size <= 44 || durationSec < 0.08) {
+      setActiveMessage('录音保存失败：录音时长过短或音频数据无效，请重试。');
+      return;
+    }
+
+    const takeNumber =
+      appState.recordings.filter(
+        (entry) => entry.projectId === contextInfo.projectId && entry.itemId === contextInfo.itemId && entry.speakerId === contextInfo.speakerId,
+      ).length + 1;
+
+    const timestamp = new Date();
+    const fileName = [
+      sanitizeAscii(selectedProjectNow.name),
+      sanitizeAscii(selectedProjectNow.scenarioId),
+      sanitizeAscii(selectedSpeaker.code),
+      sanitizeAscii(selectedItem.code),
+      `take${String(takeNumber).padStart(2, '0')}`,
+      isoStamp(timestamp),
+    ].join('__') + '.wav';
+
+    const recordingId = crypto.randomUUID();
+
+    try {
+      await saveAudioBlob(recordingId, wavBlob);
+    } catch (error) {
+      console.error(error);
+      setActiveMessage('录音保存失败：本地存储空间不足，请导出并清理后再试。');
+      return;
+    }
+
+    const recording: Recording = {
+      id: recordingId,
+      projectId: contextInfo.projectId,
+      speakerId: contextInfo.speakerId,
+      itemId: contextInfo.itemId,
+      fileName,
+      audioBlobId: recordingId,
+      createdAt: timestamp.toISOString(),
+      status: 'pending',
+      notes: recordingNotes.trim() || '无备注',
+      mimeType: 'audio/wav',
+      durationSec,
+      sampleRate: sampleRateRef.current,
+      channels: 1,
+      bitDepth: 16,
+      takeNumber,
+      scenarioId: selectedProjectNow.scenarioId,
+      itemCode: selectedItem.code,
+    };
+
+    setAppState((prev) => {
+      const recordings = [recording, ...prev.recordings];
+      return {
+        ...prev,
+        recordings,
+        items: prev.items.map((item) =>
+          item.id === contextInfo.itemId
+            ? {
+                ...item,
+                status: getItemStatus(item.id, recordings),
+              }
+            : item,
+        ),
+      };
+    });
+
+    setRecordingNotes('');
+    setActiveMessage(
+      `已保存 WAV：${recording.fileName}（${recording.sampleRate}Hz, ${recording.channels}声道, ${recording.bitDepth}bit）`,
+    );
   };
 
-  const setAsValid = (recordingId: string) => {
-    setAppState((prev) => ({
-      ...prev,
-      recordings: prev.recordings.map((recording) =>
-        recording.id === recordingId ? { ...recording, status: 'valid' } : recording,
-      ),
-      items: prev.items.map((item) => {
-        const hasValid = prev.recordings.some(
-          (recording) => recording.itemId === item.id && recording.status === 'valid',
-        );
-        if (item.id === prev.recordings.find((recording) => recording.id === recordingId)?.itemId) {
-          return { ...item, status: hasValid ? 'completed' : 'review' };
-        }
-        return item;
-      }),
-    }));
-    setActiveMessage('已标记为有效录音。');
+  const updateRecordingStatus = (recordingId: string, status: Recording['status']) => {
+    setAppState((prev) => {
+      const recordings = prev.recordings.map((recording) =>
+        recording.id === recordingId ? { ...recording, status } : recording,
+      );
+      const changed = recordings.find((entry) => entry.id === recordingId);
+      if (!changed) {
+        return prev;
+      }
+      return {
+        ...prev,
+        recordings,
+        items: prev.items.map((item) =>
+          item.id === changed.itemId
+            ? {
+                ...item,
+                status: getItemStatus(item.id, recordings),
+              }
+            : item,
+        ),
+      };
+    });
+    setActiveMessage(status === 'valid' ? '已标记为有效录音。' : '已标记为需重录。');
   };
 
-  const setAsRetake = (recordingId: string) => {
-    setAppState((prev) => ({
-      ...prev,
-      recordings: prev.recordings.map((recording) =>
-        recording.id === recordingId ? { ...recording, status: 'retake' } : recording,
-      ),
-    }));
-    setActiveMessage('已标记为需重录。');
+  const goToRelativeItem = (step: number) => {
+    if (projectItems.length === 0) {
+      return;
+    }
+    const current = selectedItemIndex >= 0 ? selectedItemIndex : 0;
+    const next = Math.max(0, Math.min(projectItems.length - 1, current + step));
+    setRecordingMeta((prev) => ({ ...prev, itemId: projectItems[next].id }));
   };
 
   const handleAiSuggestion = () => {
@@ -310,7 +576,7 @@ function App() {
     });
 
     setAiSummary(suggestion);
-    setActiveMessage('AI 建议已生成，可供复核。');
+    setActiveMessage('AI 建议已生成，可供复核（离线模板）。');
   };
 
   const exportProject = async () => {
@@ -319,68 +585,71 @@ function App() {
       return;
     }
 
+    const scenario = SCENARIO_DEFINITIONS[selectedProject.scenarioId];
+    if (!scenario) {
+      setActiveMessage('导出失败：项目场景模板不存在。');
+      return;
+    }
+
     const zip = new JSZip();
-    const projectData = {
-      project: selectedProject,
-      speakers: appState.speakers.filter((speaker) => speaker.projectId === selectedProject.id),
-      items: appState.items.filter((item) => item.projectId === selectedProject.id),
-      recordings: appState.recordings.filter((recording) => recording.projectId === selectedProject.id),
-      aiSuggestions: appState.aiSuggestions.filter((suggestion) => suggestion.projectId === selectedProject.id),
-    };
+    const projectSpeakersData = appState.speakers.filter((speaker) => speaker.projectId === selectedProject.id);
+    const projectItemsData = appState.items.filter((item) => item.projectId === selectedProject.id);
+    const projectRecordingsData = appState.recordings.filter((recording) => recording.projectId === selectedProject.id);
 
-    zip.file('project.json', JSON.stringify(projectData, null, 2));
+    const exportRecordings = projectRecordingsData.map((recording) => ({
+      ...recording,
+      audioDataUrl: undefined,
+    }));
 
-    const speakerCsv = [
-      ['id', 'code', 'gender', 'birthplace', 'currentResidence', 'dialectPoint', 'notes'],
-      ...projectData.speakers.map((speaker) => [
-        speaker.id,
-        speaker.code,
-        speaker.gender,
-        speaker.birthplace,
-        speaker.currentResidence,
-        speaker.dialectPoint,
-        speaker.notes,
-      ]),
-    ]
-      .map((row) => row.map(csvEscape).join(','))
-      .join('\n');
+    zip.file(
+      'project.json',
+      JSON.stringify(
+        {
+          project: selectedProject,
+          scenario,
+          speakers: projectSpeakersData,
+          items: projectItemsData,
+          recordings: exportRecordings,
+        },
+        null,
+        2,
+      ),
+    );
 
-    zip.file('speakers.csv', speakerCsv);
+    const recordingsCsv = [
+      ['project', 'scenario', 'item_code', 'speaker', 'take', 'status', 'timestamp', 'filename', 'notes'],
+    ];
 
-    const itemCsv = [
-      ['id', 'code', 'hanzi', 'word', 'meaning', 'phonetic', 'tone', 'status', 'notes'],
-      ...projectData.items.map((item) => [
-        item.id,
-        item.code,
-        item.hanzi,
-        item.word,
-        item.meaning,
-        item.phonetic,
-        item.tone,
-        item.status,
-        item.notes,
-      ]),
-    ]
-      .map((row) => row.map(csvEscape).join(','))
-      .join('\n');
-
-    zip.file('items.csv', itemCsv);
-
-    for (const recording of projectData.recordings) {
-      if (recording.audioDataUrl) {
-        const blob = dataUrlToBlob(recording.audioDataUrl);
+    for (const recording of projectRecordingsData) {
+      const blob = await getPreferredBlob(recording);
+      if (blob) {
         zip.file(`audio/${recording.fileName}`, blob);
       }
+      const speaker = projectSpeakersData.find((entry) => entry.id === recording.speakerId);
+      const item = projectItemsData.find((entry) => entry.id === recording.itemId);
+      recordingsCsv.push([
+        selectedProject.name,
+        selectedProject.scenarioTitle,
+        item?.code || recording.itemCode || '',
+        speaker?.code || '',
+        String(recording.takeNumber ?? ''),
+        recording.status,
+        recording.createdAt,
+        recording.fileName,
+        recording.notes || '',
+      ]);
     }
+
+    zip.file('recordings.csv', recordingsCsv.map((row) => row.map(csvEscape).join(',')).join('\n'));
 
     const blob = await zip.generateAsync({ type: 'blob' });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
     anchor.href = url;
-    anchor.download = `${selectedProject.name.toLowerCase().replace(/\s+/g, '-')}-project.zip`;
+    anchor.download = `${sanitizeAscii(selectedProject.name)}-project.zip`;
     anchor.click();
     URL.revokeObjectURL(url);
-    setActiveMessage('项目已导出为ZIP包。');
+    setActiveMessage('项目已导出：包含 WAV、recordings.csv 与元数据。');
   };
 
   return (
@@ -388,7 +657,7 @@ function App() {
       <header className="topbar">
         <div className="brand">
           <h1>客家话田野调查助手</h1>
-          <small>黑客松 MVP · 离线优先 · AI 辅助整理</small>
+          <small>黑客松 MVP · 场景模板驱动 · 离线优先</small>
         </div>
         <div className="toolbar">
           <button className="secondary" onClick={createProject}>新建项目</button>
@@ -405,9 +674,9 @@ function App() {
       <div className="grid">
         <section className="card primary">
           <div className="section">
-            <h3>项目</h3>
+            <h3>项目与调查场景</h3>
             <div className="row">
-              <label style={{ flex: '1 1 200px' }}>
+              <label style={{ flex: '1 1 220px' }}>
                 项目名
                 <input value={newProjectName} onChange={(event) => setNewProjectName(event.target.value)} />
               </label>
@@ -420,29 +689,39 @@ function App() {
                 <input value={newProjectDialect} onChange={(event) => setNewProjectDialect(event.target.value)} />
               </label>
             </div>
+            <div className="row" style={{ marginTop: 12 }}>
+              <label style={{ flex: '1 1 280px' }}>
+                调查场景（必选）
+                <select value={newProjectScenarioId} onChange={(event) => setNewProjectScenarioId(event.target.value as ScenarioId)}>
+                  {SCENARIOS.map((scenario) => (
+                    <option key={scenario.id} value={scenario.id}>{scenario.title}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
             <div className="inline-actions" style={{ marginTop: 12 }}>
-              <button onClick={createProject}>保存项目</button>
+              <button onClick={createProject}>保存项目并加载模板条目</button>
             </div>
           </div>
 
           <div className="section">
             <h3>项目选择</h3>
-            <div className="row">
-              <label style={{ flex: '1 1 260px' }}>
-                当前项目
-                <select value={selectedProjectId} onChange={(event) => setSelectedProjectId(event.target.value)}>
-                  {appState.projects.length === 0 && <option value="">暂无项目</option>}
-                  {appState.projects.map((project) => (
-                    <option key={project.id} value={project.id}>{project.name}</option>
-                  ))}
-                </select>
-              </label>
-            </div>
+            <label style={{ maxWidth: 360 }}>
+              当前项目
+              <select value={selectedProjectId} onChange={(event) => setSelectedProjectId(event.target.value)}>
+                {appState.projects.length === 0 && <option value="">暂无项目</option>}
+                {appState.projects.map((project) => (
+                  <option key={project.id} value={project.id}>{project.name}</option>
+                ))}
+              </select>
+            </label>
             {selectedProject && (
               <div className="summary-box" style={{ marginTop: 12 }}>
                 <strong>{selectedProject.name}</strong>
                 <div>地点：{selectedProject.location}</div>
                 <div>方言：{selectedProject.dialectArea}</div>
+                <div>场景：{selectedProject.scenarioTitle}</div>
+                <div>模板版本：{selectedProject.scenarioVersion}</div>
               </div>
             )}
           </div>
@@ -454,7 +733,7 @@ function App() {
                 编号
                 <input value={newSpeaker.code} onChange={(event) => setNewSpeaker({ ...newSpeaker, code: event.target.value })} />
               </label>
-              <label style={{ flex: '1 1 160px' }}>
+              <label style={{ flex: '1 1 140px' }}>
                 性别
                 <select value={newSpeaker.gender} onChange={(event) => setNewSpeaker({ ...newSpeaker, gender: event.target.value })}>
                   <option value="未知">未知</option>
@@ -489,44 +768,36 @@ function App() {
           </div>
 
           <div className="section">
-            <h3>调查条目</h3>
-            <div className="row">
-              <label style={{ flex: '1 1 160px' }}>
-                编号
-                <input value={newItem.code} onChange={(event) => setNewItem({ ...newItem, code: event.target.value })} />
-              </label>
-              <label style={{ flex: '1 1 160px' }}>
-                汉字
-                <input value={newItem.hanzi} onChange={(event) => setNewItem({ ...newItem, hanzi: event.target.value })} />
-              </label>
-              <label style={{ flex: '1 1 180px' }}>
-                词语
-                <input value={newItem.word} onChange={(event) => setNewItem({ ...newItem, word: event.target.value })} />
-              </label>
-            </div>
-            <div className="row" style={{ marginTop: 12 }}>
-              <label style={{ flex: '1 1 200px' }}>
-                语义
-                <input value={newItem.meaning} onChange={(event) => setNewItem({ ...newItem, meaning: event.target.value })} />
-              </label>
-              <label style={{ flex: '1 1 150px' }}>
-                音标
-                <input value={newItem.phonetic} onChange={(event) => setNewItem({ ...newItem, phonetic: event.target.value })} />
-              </label>
-              <label style={{ flex: '1 1 100px' }}>
-                声调
-                <input value={newItem.tone} onChange={(event) => setNewItem({ ...newItem, tone: event.target.value })} />
-              </label>
-            </div>
-            <div style={{ marginTop: 12 }}>
-              <label>
-                备注
-                <textarea value={newItem.notes} onChange={(event) => setNewItem({ ...newItem, notes: event.target.value })} />
-              </label>
-            </div>
-            <div className="inline-actions" style={{ marginTop: 12 }}>
-              <button onClick={addItem}>新增条目</button>
-            </div>
+            <h3>场景说明与进度</h3>
+            {selectedScenario ? (
+              <div className="summary-box">
+                <strong>{selectedScenario.title}</strong>
+                <p>{selectedScenario.description}</p>
+                <ul>
+                  {selectedScenario.instructions.map((instruction) => (
+                    <li key={instruction}>{instruction}</li>
+                  ))}
+                </ul>
+                <div className="metrics">
+                  <div className="metric"><small>总条目</small><strong>{progress.total}</strong></div>
+                  <div className="metric"><small>已录音</small><strong>{progress.recorded}</strong></div>
+                  <div className="metric"><small>有效</small><strong>{progress.valid}</strong></div>
+                  <div className="metric"><small>需重录</small><strong>{progress.retake}</strong></div>
+                  <div className="metric"><small>待采录</small><strong>{progress.pending}</strong></div>
+                </div>
+                <div className="inline-actions">
+                  <button className="warning" onClick={reloadScenarioTemplate}>重载模板（保留录音）</button>
+                </div>
+              </div>
+            ) : (
+              <p className="empty">当前项目缺少场景定义。</p>
+            )}
+            <details style={{ marginTop: 12 }}>
+              <summary>开发者入口（非标准流程）</summary>
+              <div style={{ marginTop: 8 }}>
+                <button className="ghost" onClick={addCustomItem}>新增自定义条目</button>
+              </div>
+            </details>
           </div>
         </section>
 
@@ -551,16 +822,16 @@ function App() {
           </div>
 
           <div className="section">
-            <h3>条目列表</h3>
+            <h3>条目队列（主工作区）</h3>
             {projectItems.length === 0 ? (
-              <p className="empty">暂无条目。</p>
+              <p className="empty">暂无条目，请先创建带场景的项目。</p>
             ) : (
               <ul className="list">
                 {projectItems.map((item) => (
                   <li key={item.id} className="item-row">
                     <div>
-                      <strong>{item.hanzi || item.word || item.code}</strong>
-                      <small>{item.phone || item.phonetic || '—'} · {item.status}</small>
+                      <strong>{item.code} · {item.prompt || item.hanzi || item.word || '—'}</strong>
+                      <small>{item.targetContext || '—'} · {item.changeType || '—'}</small>
                     </div>
                     <div className="status-line">
                       <span className={`badge ${item.status}`}>{item.status}</span>
@@ -575,7 +846,7 @@ function App() {
       </div>
 
       <section className="card section" style={{ marginTop: 20 }}>
-        <h3>录音工作台</h3>
+        <h3>录音工作台（WAV）</h3>
         <div className="recording-panel">
           <div className="recording-visual">
             <div className="recording-wave" />
@@ -585,6 +856,10 @@ function App() {
             <div className="metric">
               <small>项目</small>
               <strong>{selectedProject?.name || '未选择'}</strong>
+            </div>
+            <div className="metric">
+              <small>场景</small>
+              <strong>{selectedProject?.scenarioTitle || '未选择'}</strong>
             </div>
             <div className="metric">
               <small>发音人</small>
@@ -609,7 +884,7 @@ function App() {
               当前条目
               <select value={selectedItemId} onChange={(event) => setRecordingMeta((prev) => ({ ...prev, itemId: event.target.value }))}>
                 {projectItems.map((item) => (
-                  <option key={item.id} value={item.id}>{item.code}</option>
+                  <option key={item.id} value={item.id}>{item.code} / {item.prompt || item.word || '—'}</option>
                 ))}
               </select>
             </label>
@@ -626,9 +901,11 @@ function App() {
             {!isRecording ? (
               <button onClick={startRecording}>开始录音</button>
             ) : (
-              <button className="warning" onClick={stopRecording}>停止录音</button>
+              <button className="warning" onClick={() => void stopRecording()}>停止录音并保存WAV</button>
             )}
-            <button className="secondary" onClick={handleAiSuggestion}>AI 整理备注</button>
+            <button className="secondary" onClick={() => goToRelativeItem(-1)}>上一条</button>
+            <button className="secondary" onClick={() => goToRelativeItem(1)}>下一条</button>
+            <button className="ghost" onClick={handleAiSuggestion}>AI 整理备注</button>
           </div>
         </div>
       </section>
@@ -646,18 +923,16 @@ function App() {
                 return (
                   <li key={recording.id} className="item-row">
                     <div>
-                      <strong>{item?.hanzi || item?.word || item?.code || '未命名条目'}</strong>
+                      <strong>{item?.code || '未命名条目'} · {item?.prompt || item?.hanzi || item?.word || '—'}</strong>
                       <small>
-                        {speaker?.code || '未知发音人'} · {new Date(recording.createdAt).toLocaleString()}
+                        {speaker?.code || '未知发音人'} · {new Date(recording.createdAt).toLocaleString()} · {recording.fileName}
                       </small>
                     </div>
                     <div className="status-line">
                       <span className={`badge ${recording.status}`}>{recording.status}</span>
-                      {recording.audioDataUrl && (
-                        <audio controls src={recording.audioDataUrl} />
-                      )}
-                      <button className="ghost" onClick={() => setAsValid(recording.id)}>有效</button>
-                      <button className="warning" onClick={() => setAsRetake(recording.id)}>重录</button>
+                      {audioUrls[recording.id] ? <audio controls src={audioUrls[recording.id]} /> : <span className="badge pending">音频缺失</span>}
+                      <button className="ghost" onClick={() => updateRecordingStatus(recording.id, 'valid')}>有效</button>
+                      <button className="warning" onClick={() => updateRecordingStatus(recording.id, 'retake')}>重录</button>
                     </div>
                   </li>
                 );
@@ -677,7 +952,7 @@ function App() {
                   <span key={tag} className="badge pending">{tag}</span>
                 ))}
               </div>
-              {aiSummary.recommendations && aiSummary.recommendations.length > 0 && (
+              {aiSummary.recommendations.length > 0 && (
                 <ul>
                   {aiSummary.recommendations.map((recommendation) => (
                     <li key={recommendation}>{recommendation}</li>
