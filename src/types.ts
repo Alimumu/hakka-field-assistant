@@ -19,6 +19,8 @@ export type Speaker = {
   createdAt: string;
 };
 
+export type ItemStatus = 'pending' | 'recorded' | 'review' | 'completed';
+
 export type Item = {
   id: string;
   projectId: string;
@@ -29,9 +31,11 @@ export type Item = {
   phonetic?: string;
   tone?: string;
   notes?: string;
-  status: 'pending' | 'recorded' | 'review' | 'completed';
+  status: ItemStatus;
   createdAt: string;
 };
+
+export type RecordingStatus = 'pending' | 'valid' | 'retake';
 
 export type Recording = {
   id: string;
@@ -39,9 +43,14 @@ export type Recording = {
   speakerId: string;
   itemId: string;
   fileName: string;
-  audioDataUrl: string;
+  audioBlobId?: string;
+  audioMimeType?: string;
+  audioSizeBytes?: number;
+  audioPersisted: boolean;
+  persistenceError?: string;
+  durationMs?: number;
   createdAt: string;
-  status: 'pending' | 'valid' | 'retake';
+  status: RecordingStatus;
   notes?: string;
 };
 
@@ -53,6 +62,7 @@ export type AiSuggestionRecord = {
   summary: string;
   tags: string[];
   recommendations: string[];
+  source: 'local-fallback' | 'deepseek-adapter';
 };
 
 export type AppState = {
