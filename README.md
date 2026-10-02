@@ -1,63 +1,64 @@
-# Hakka Field Assistant
+# 客家话田野调查助手（Hakka Field Assistant）
 
-A minimal fieldwork prototype for Hakka dialect investigations, designed for a 1-month hackathon workflow with a single developer and one linguistics researcher.
+面向一个月黑客松 MVP 的离线优先采录工具：项目管理、发音人/条目管理、浏览器录音、录音复核与导出。
 
-## Goals
+## 1. 本地启动
 
-- Manage fieldwork projects and speakers.
-- Create and import investigation items.
-- Record audio from the browser microphone.
-- Store local metadata and export project packages.
-- Use an AI assistant (DeepSeek-ready adapter) for note summarization and review suggestions.
-- Enable offline-first usage without cloud dependency.
+```bash
+npm install
+npm run dev
+```
 
-## Tech stack
+生产构建与类型检查：
 
-- React
-- TypeScript
-- Vite
-- IndexedDB-ready local storage structure
-- JSZip for export
-- DeepSeek adapter scaffold
+```bash
+npm run lint
+npm run build
+```
 
-## Getting started
+## 2. 浏览器与麦克风要求
 
-1. Install dependencies:
+- 推荐浏览器：最新版 **Chrome / Edge / Firefox**（需支持 `MediaRecorder` 与 `IndexedDB`）。
+- 首次录音时需允许麦克风权限。
+- 若被拒绝，请点击地址栏麦克风图标重新允许，再刷新页面。
+- 若无可用设备，会提示“未检测到可用麦克风设备”。
 
-   npm install
+## 3. 当前 MVP 功能
 
-2. Run the app:
+- 创建/选择项目。
+- 新增/选择发音人。
+- 新增条目或通过 CSV 导入条目（UTF-8，首行表头，支持 `code, hanzi, word, meaning, phonetic, tone, notes`，缺列可容错）。
+- 录音、停止并保存、播放、标记“有效/重录”。
+- 导出 ZIP：
+  - `project.json`
+  - `speakers.csv`
+  - `items.csv`
+  - `recordings.csv`
+  - `audio/*.webm`
+- 清空当前项目、清空全部本地数据（均带确认）。
+- AI 建议模块默认为**离线本地回退**，并预留 DeepSeek 后端代理边界（前端不保存密钥）。
 
-   npm run dev
+## 4. 持久化策略
 
-3. Open the local URL shown in the terminal.
+- 元数据（项目、发音人、条目、录音索引）保存到 `localStorage`。
+- 音频 Blob 保存到 `IndexedDB`（与元数据分离，避免将大音频直接塞进 `localStorage`）。
+- 若持久化失败（例如配额不足），界面会显示警告，不会导致崩溃；建议立即导出 ZIP 备份。
 
-## Suggested workflow
+## 5. 当前限制
 
-1. Create a project.
-2. Enter the location and dialect area.
-3. Add speakers.
-4. Add fieldwork items or import CSV.
-5. Record the selected item.
-6. Mark valid or retake.
-7. Use AI note summarization to improve workflow.
-8. Export the project as a ZIP bundle.
+- 仅本地单机原型，不含账号、协作、云同步。
+- 录音格式以浏览器支持为准（默认 webm/opus）。
+- 未实现自动音标识别、TextGrid、ASR、完整后端。
+- CSV 解析为轻量手写实现，适用于中小规模词表导入。
 
-## Important note
+## 6. 研究者手动验收清单（建议现场走查）
 
-This is a prototype and intentionally prioritizes a minimal viable workflow over full phonetic analysis.
-The AI integration is intentionally scaffolded so it can later be upgraded to a DeepSeek backend proxy without changing the frontend UI.
-
-## Files to extend later
-
-- `src/lib/ai.ts` for the AI adapter and model wrapper.
-- `src/lib/storage.ts` for local persistence and data model updates.
-- `src/App.tsx` for project workflow UI.
-
-## Roadmap
-
-- Stable field recording and local saving.
-- AI-assisted note review.
-- Better export format.
-- CSV import, project recovery, and stronger data validation.
-- Full DeepSeek backend proxy and export formatting.
+- [ ] 可创建项目并在刷新后仍能看到项目。
+- [ ] 可新增发音人、条目，并可选中用于录音。
+- [ ] 麦克风权限允许后可开始录音，停止后出现录音记录。
+- [ ] 录音可回放，且可标记“有效/重录”。
+- [ ] 导入 UTF-8 CSV 后条目正确进入列表；缺列与异常行有可见提示。
+- [ ] 刷新页面后，项目/发音人/条目/录音索引可恢复。
+- [ ] 导出 ZIP 后包含 `project.json/speakers.csv/items.csv/recordings.csv/audio/`。
+- [ ] 清空当前项目与清空全部数据均需要确认，执行后状态正确。
+- [ ] AI 建议可在离线场景生成，不阻断录音与导出流程。
