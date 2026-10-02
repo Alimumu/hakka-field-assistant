@@ -10,6 +10,92 @@ import type { AppState, Item, ItemStatus, Project, Recording, ScenarioId, Speake
 const DEFAULT_SCENARIO_ID: ScenarioId = 'hakka_lian_du_bian_diao';
 const defaultProjectName = '新调查项目';
 
+type ResourceModuleId = 'scenes' | 'dialectPoints' | 'projects';
+
+type MockScene = {
+  id: string;
+  title: string;
+  kind: '内置场景' | '研发占位';
+  status: '可用' | '原型占位';
+  description: string;
+};
+
+type MockDialectPoint = {
+  id: string;
+  name: string;
+  level: string;
+  location: string;
+  status: string;
+  speakers: number;
+};
+
+type MockProjectCard = {
+  id: string;
+  name: string;
+  dialectPoint: string;
+  scenario: string;
+  status: string;
+  speakerCount: number;
+  recordingProgress: string;
+  wavStatus: string;
+  praatStatus: string;
+};
+
+const MOCK_SCENES: MockScene[] = [
+  {
+    id: 'builtin-lian-du',
+    title: '连读变调',
+    kind: '内置场景',
+    status: '可用',
+    description: '主场景模板，展示引文调与连读语境的配对采录结构。',
+  },
+  {
+    id: 'builtin-xiao-cheng',
+    title: '小称变调',
+    kind: '内置场景',
+    status: '可用',
+    description: '次场景模板，展示基础词与小称形式的对比采录结构。',
+  },
+  {
+    id: 'builtin-dan-zi',
+    title: '单字调',
+    kind: '内置场景',
+    status: '原型占位',
+    description: '资源管理原型中的内置场景占位，用于后续补齐场景模板与条目结构。',
+  },
+];
+
+const MOCK_DIALECT_POINTS: MockDialectPoint[] = [
+  { id: 'dp-meixian', name: '梅县区（示例）', level: '核心点', location: '广东省梅州市梅县区', status: '调查中', speakers: 3 },
+  { id: 'dp-xingning', name: '兴宁（示例）', level: '扩展点', location: '广东省梅州市兴宁市', status: '待启动', speakers: 0 },
+  { id: 'dp-wuhua', name: '五华（示例）', level: '扩展点', location: '广东省梅州市五华县', status: '已建档', speakers: 1 },
+];
+
+const MOCK_PROJECT_CARDS: MockProjectCard[] = [
+  {
+    id: 'proj-001',
+    name: '梅县连读变调首轮调查',
+    dialectPoint: '梅县区（示例）',
+    scenario: '连读变调',
+    status: '进行中',
+    speakerCount: 3,
+    recordingProgress: '18 / 40',
+    wavStatus: '已启用 WAV',
+    praatStatus: '待补 TextGrid',
+  },
+  {
+    id: 'proj-002',
+    name: '兴宁小称变调摸底',
+    dialectPoint: '兴宁（示例）',
+    scenario: '小称变调',
+    status: '准备中',
+    speakerCount: 0,
+    recordingProgress: '0 / 24',
+    wavStatus: '未开始',
+    praatStatus: '未开始',
+  },
+];
+
 const dataUrlToBlob = (dataUrl: string): Blob => {
   const [prefix, base64] = dataUrl.split(',');
   const mime = prefix.match(/data:(.*?);base64/)?.[1] ?? 'audio/webm';
@@ -107,6 +193,9 @@ function App() {
   const [aiSummary, setAiSummary] = useState<AiSuggestion | null>(null);
   const [isRecording, setIsRecording] = useState(false);
   const [activeMessage, setActiveMessage] = useState('');
+  const [activeView, setActiveView] = useState<'survey' | 'resource'>('survey');
+  const [activeResourceModule, setActiveResourceModule] = useState<ResourceModuleId>('scenes');
+  const [showSceneDraft, setShowSceneDraft] = useState(false);
   const [recordingMeta, setRecordingMeta] = useState<{ speakerId: string; itemId: string }>({ speakerId: '', itemId: '' });
   const [audioUrls, setAudioUrls] = useState<Record<string, string>>({});
 
@@ -652,6 +741,10 @@ function App() {
     setActiveMessage('项目已导出：包含 WAV、recordings.csv 与元数据。');
   };
 
+  const showPrototypePlaceholder = (message: string) => {
+    setActiveMessage(`原型占位：${message}`);
+  };
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -660,8 +753,14 @@ function App() {
           <small>黑客松 MVP · 场景模板驱动 · 离线优先</small>
         </div>
         <div className="toolbar">
-          <button className="secondary" onClick={createProject}>新建项目</button>
-          <button className="ghost" onClick={exportProject}>导出项目</button>
+          <button className={activeView === 'survey' ? '' : 'secondary'} onClick={() => setActiveView('survey')}>调查工作台</button>
+          <button className={activeView === 'resource' ? '' : 'secondary'} onClick={() => setActiveView('resource')}>资源管理概览</button>
+          {activeView === 'survey' && (
+            <>
+              <button className="secondary" onClick={createProject}>新建项目</button>
+              <button className="ghost" onClick={exportProject}>导出项目</button>
+            </>
+          )}
         </div>
       </header>
 
@@ -671,7 +770,9 @@ function App() {
         </div>
       )}
 
-      <div className="grid">
+      {activeView === 'survey' ? (
+        <>
+          <div className="grid">
         <section className="card primary">
           <div className="section">
             <h3>项目与调查场景</h3>
@@ -845,7 +946,7 @@ function App() {
         </aside>
       </div>
 
-      <section className="card section" style={{ marginTop: 20 }}>
+          <section className="card section" style={{ marginTop: 20 }}>
         <h3>录音工作台（WAV）</h3>
         <div className="recording-panel">
           <div className="recording-visual">
@@ -910,7 +1011,7 @@ function App() {
         </div>
       </section>
 
-      <div className="grid" style={{ marginTop: 20 }}>
+          <div className="grid" style={{ marginTop: 20 }}>
         <section className="card primary">
           <h3>录音记录</h3>
           {projectRecordings.length === 0 ? (
@@ -964,7 +1065,113 @@ function App() {
             <p className="empty">尚未生成建议。</p>
           )}
         </aside>
-      </div>
+          </div>
+        </>
+      ) : (
+        <section className="card section">
+          <h3>资源管理概览（前端原型）</h3>
+          <p className="empty">仅展示信息架构与交互占位，不接入后端、地图 SDK、DeepSeek 或完整业务逻辑。</p>
+
+          <div className="inline-actions" style={{ marginTop: 12 }}>
+            <button className={activeResourceModule === 'scenes' ? '' : 'secondary'} onClick={() => setActiveResourceModule('scenes')}>场景管理</button>
+            <button className={activeResourceModule === 'dialectPoints' ? '' : 'secondary'} onClick={() => setActiveResourceModule('dialectPoints')}>方言点管理</button>
+            <button className={activeResourceModule === 'projects' ? '' : 'secondary'} onClick={() => setActiveResourceModule('projects')}>项目管理</button>
+          </div>
+
+          {activeResourceModule === 'scenes' && (
+            <div className="prototype-section">
+              <p className="module-desc">内置场景展示：连读变调、小称变调、单字调；支持“新增调查场景”占位入口。</p>
+              <ul className="list">
+                {MOCK_SCENES.map((scene) => (
+                  <li key={scene.id} className="item-row">
+                    <div>
+                      <strong>{scene.title}</strong>
+                      <small>{scene.description}</small>
+                    </div>
+                    <div className="status-line">
+                      <span className="badge">{scene.kind}</span>
+                      <span className="badge pending">{scene.status}</span>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+              <div className="inline-actions" style={{ marginTop: 12 }}>
+                <button onClick={() => setShowSceneDraft(true)}>新增调查场景（占位）</button>
+              </div>
+              {showSceneDraft && (
+                <div className="summary-box" style={{ marginTop: 12 }}>
+                  <strong>新增调查场景 · 草稿弹窗（原型）</strong>
+                  <p>此处后续可接入“场景名称、说明、条目草案”编辑流程；当前仅演示入口，不会保存到本地数据。</p>
+                  <button className="secondary" onClick={() => setShowSceneDraft(false)}>关闭草稿</button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeResourceModule === 'dialectPoints' && (
+            <div className="prototype-section">
+              <p className="module-desc">展示方言点名称、等级、位置、调查状态，并提供地图概览占位区域（非真实地图）。</p>
+              {MOCK_DIALECT_POINTS.length === 0 ? (
+                <p className="empty">暂无方言点数据（原型空状态）。</p>
+              ) : (
+                <ul className="list">
+                  {MOCK_DIALECT_POINTS.map((point) => (
+                    <li key={point.id} className="item-row">
+                      <div>
+                        <strong>{point.name}</strong>
+                        <small>{point.level} · {point.location}</small>
+                      </div>
+                      <div className="status-line">
+                        <span className="badge">{point.status}</span>
+                        <span className="badge review">发音人 {point.speakers}</span>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <div className="map-placeholder">
+                <strong>地图概览（原型占位）</strong>
+                <small>仅为静态示意，避免误认为已接入真实地图服务。</small>
+                <div className="map-dots">
+                  {MOCK_DIALECT_POINTS.map((point) => (
+                    <span key={point.id} className="map-dot">{point.name.replace('（示例）', '')}</span>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeResourceModule === 'projects' && (
+            <div className="prototype-section">
+              <p className="module-desc">项目卡片 = 方言点 + 调查场景，展示状态、发音人数、录音进度、WAV/Praat 数据状态。</p>
+              {MOCK_PROJECT_CARDS.length === 0 ? (
+                <p className="empty">暂无项目数据（原型空状态）。</p>
+              ) : (
+                <div className="project-cards">
+                  {MOCK_PROJECT_CARDS.map((project) => (
+                    <article key={project.id} className="card project-card">
+                      <strong>{project.name}</strong>
+                      <small>{project.dialectPoint} + {project.scenario}</small>
+                      <div className="status-line">
+                        <span className="badge">{project.status}</span>
+                        <span className="badge review">发音人 {project.speakerCount}</span>
+                      </div>
+                      <div className="status-line">
+                        <span className="badge recorded">录音进度 {project.recordingProgress}</span>
+                        <span className="badge pending">{project.wavStatus}</span>
+                        <span className="badge pending">{project.praatStatus}</span>
+                      </div>
+                      <button className="ghost" onClick={() => showPrototypePlaceholder(`“${project.name}”导出项目功能待后续研发`)}>
+                        导出项目（占位）
+                      </button>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </section>
+      )}
     </div>
   );
 }

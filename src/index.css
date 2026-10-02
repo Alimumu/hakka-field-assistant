@@ -299,6 +299,56 @@ button.ghost {
   font-style: italic;
 }
 
+.prototype-section {
+  margin-top: 16px;
+}
+
+.module-desc {
+  margin-top: 0;
+  color: #334155;
+}
+
+.map-placeholder {
+  margin-top: 14px;
+  border: 1px dashed #94a3b8;
+  border-radius: 12px;
+  background: #f8fafc;
+  padding: 12px;
+  display: grid;
+  gap: 6px;
+}
+
+.map-placeholder small {
+  color: #475569;
+}
+
+.map-dots {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.map-dot {
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: #dbeafe;
+  color: #1e3a8a;
+  font-size: 0.8rem;
+}
+
+.project-cards {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.project-card {
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+}
+
 @media (max-width: 900px) {
   .primary,
   .secondary {
